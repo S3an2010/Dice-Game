@@ -55,6 +55,10 @@
   (or (is-eq prediction bet-type-high) (is-eq prediction bet-type-low))
 )
 
+(define-private (is-valid-game-id (game-id uint))
+  (and (> game-id u0) (< game-id (var-get next-game-id)))
+)
+
 ;; Roll dice for specific number prediction (1-6)
 (define-public (roll-dice-number (prediction uint) (bet-amount uint))
   (let ((game-id (var-get next-game-id)))
@@ -122,37 +126,46 @@
 )
 
 ;; Resolve a game with the dice roll result (only contract owner can call)
-(define-public (resolve-game (game-id uint) (dice-roll uint))
+(define-public (resolve-game (input-game-id uint) (input-dice-roll uint))
   (let (
-    (game (unwrap! (map-get? games { game-id: game-id }) err-game-not-found))
-    (is-winner (calculate-winner game dice-roll))
-    (payout-amount (if is-winner (calculate-payout game) u0))
+    ;; Validate inputs and create safe bindings
+    (safe-game-id (begin
+      (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+      (asserts! (is-valid-game-id input-game-id) err-game-not-found)
+      input-game-id))
+    (safe-dice-roll (begin
+      (asserts! (is-valid-dice-number input-dice-roll) err-invalid-dice-roll)
+      input-dice-roll))
+    (game (unwrap! (map-get? games { game-id: safe-game-id }) err-game-not-found))
   )
-    ;; Validations
-    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
-    (asserts! (is-valid-dice-number dice-roll) err-invalid-dice-roll)
+    ;; Additional game state validation
     (asserts! (is-eq (get status game) status-pending) err-game-already-resolved)
 
-    ;; Pay winner if applicable
-    (if (and is-winner (> payout-amount u0))
-      (begin
-        (try! (as-contract (stx-transfer? payout-amount tx-sender (get player game))))
-        (var-set contract-balance (- (var-get contract-balance) payout-amount))
+    (let (
+      (is-winner (calculate-winner game safe-dice-roll))
+      (payout-amount (if is-winner (calculate-payout game) u0))
+    )
+      ;; Pay winner if applicable
+      (if (and is-winner (> payout-amount u0))
+        (begin
+          (try! (as-contract (stx-transfer? payout-amount tx-sender (get player game))))
+          (var-set contract-balance (- (var-get contract-balance) payout-amount))
+        )
+        ;; Update contract balance (house keeps the bet if player loses)
+        true
       )
-      ;; Update contract balance (house keeps the bet if player loses)
-      true
-    )
 
-    ;; Update game record with results
-    (map-set games { game-id: game-id }
-      (merge game {
-        dice-result: (some dice-roll),
-        payout: payout-amount,
-        status: (if is-winner status-won status-lost)
-      })
-    )
+      ;; Update game record with results
+      (map-set games { game-id: safe-game-id }
+        (merge game {
+          dice-result: (some safe-dice-roll),
+          payout: payout-amount,
+          status: (if is-winner status-won status-lost)
+        })
+      )
 
-    (ok is-winner)
+      (ok is-winner)
+    )
   )
 )
 
